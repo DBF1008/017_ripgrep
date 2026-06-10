@@ -4,7 +4,7 @@ use std::{
     fs::{self, FileType, Metadata},
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
     sync::{Arc, OnceLock},
 };
 
@@ -15,12 +15,126 @@ use {
 };
 
 use crate::{
-    Error, PartialErrorBuilder,
+    Error, Match, PartialErrorBuilder,
     dir::{Ignore, IgnoreBuilder},
     gitignore::GitignoreBuilder,
     overrides::Override,
     types::Types,
 };
+
+/// Classification of why a directory entry was skipped during a walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SkipCategory {
+    /// Skipped by a glob override (`--glob`/`-g`).
+    Override,
+    /// Skipped by an ignore rule (`.gitignore`, `.ignore`, `.rgignore`, etc.).
+    Gitignore,
+    /// Skipped by a file type filter (`--type`/`-t`).
+    Types,
+    /// Skipped because the entry is hidden.
+    Hidden,
+    /// Skipped because the file exceeds the size limit (`--max-filesize`).
+    Filesize,
+    /// Skipped by a custom filter predicate (`filter_entry`).
+    Filter,
+}
+
+/// Aggregate statistics about why directory entries were skipped during a walk.
+///
+/// All counters use atomic operations and are safe to read from any thread
+/// after the walk completes. Obtain an instance via
+/// [`WalkBuilder::filter_stats`] before calling `build()` or
+/// `build_parallel()`, then read the counters after the walk finishes.
+#[derive(Debug, Default)]
+pub struct WalkFilterStats {
+    skipped_override: AtomicU64,
+    skipped_gitignore: AtomicU64,
+    skipped_types: AtomicU64,
+    skipped_hidden: AtomicU64,
+    skipped_filesize: AtomicU64,
+    skipped_filter: AtomicU64,
+    total_entries: AtomicU64,
+}
+
+impl WalkFilterStats {
+    /// Number of entries skipped by glob overrides (`--glob`/`-g`).
+    pub fn skipped_override(&self) -> u64 {
+        self.skipped_override.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Number of entries skipped by ignore rules
+    /// (`.gitignore`, `.ignore`, `.rgignore`, `--ignore-file`, etc.).
+    pub fn skipped_gitignore(&self) -> u64 {
+        self.skipped_gitignore.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Number of entries skipped by file type filters (`--type`/`-t`).
+    pub fn skipped_types(&self) -> u64 {
+        self.skipped_types.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Number of entries skipped because they are hidden.
+    pub fn skipped_hidden(&self) -> u64 {
+        self.skipped_hidden.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Number of entries skipped due to file size limits (`--max-filesize`).
+    pub fn skipped_filesize(&self) -> u64 {
+        self.skipped_filesize.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Number of entries skipped by custom filter predicates.
+    pub fn skipped_filter(&self) -> u64 {
+        self.skipped_filter.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Total number of directory entries examined during the walk.
+    pub fn total_entries(&self) -> u64 {
+        self.total_entries.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Total number of entries skipped across all filter dimensions.
+    pub fn total_skipped(&self) -> u64 {
+        self.skipped_override()
+            + self.skipped_gitignore()
+            + self.skipped_types()
+            + self.skipped_hidden()
+            + self.skipped_filesize()
+            + self.skipped_filter()
+    }
+
+    /// Returns true if any entries were skipped.
+    pub fn has_skips(&self) -> bool {
+        self.total_skipped() > 0
+    }
+
+    fn record_skip(&self, category: SkipCategory) {
+        match category {
+            SkipCategory::Override => {
+                self.skipped_override.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            SkipCategory::Gitignore => {
+                self.skipped_gitignore.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            SkipCategory::Types => {
+                self.skipped_types.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            SkipCategory::Hidden => {
+                self.skipped_hidden.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            SkipCategory::Filesize => {
+                self.skipped_filesize.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            SkipCategory::Filter => {
+                self.skipped_filter.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        }
+    }
+
+    fn record_entry(&self) {
+        self.total_entries.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
 
 /// A directory entry with a possible error attached.
 ///
@@ -492,6 +606,7 @@ pub struct WalkBuilder {
     threads: usize,
     skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
+    filter_stats: Option<Arc<WalkFilterStats>>,
     /// The directory that gitignores should be interpreted relative to.
     ///
     /// Usually this is the directory containing the gitignore file. But in
@@ -529,6 +644,7 @@ impl std::fmt::Debug for WalkBuilder {
             .field("threads", &self.threads)
             .field("skip", &self.skip)
             .field("filter", &"<...>")
+            .field("filter_stats", &self.filter_stats)
             .field(
                 "global_gitignores_relative_to",
                 &self.global_gitignores_relative_to,
@@ -557,6 +673,7 @@ impl WalkBuilder {
             threads: 0,
             skip: None,
             filter: None,
+            filter_stats: None,
             global_gitignores_relative_to: OnceLock::new(),
         }
     }
@@ -614,6 +731,7 @@ impl WalkBuilder {
             max_filesize: self.max_filesize,
             skip: self.skip.clone(),
             filter: self.filter.clone(),
+            filter_stats: self.filter_stats.clone(),
         }
     }
 
@@ -638,6 +756,7 @@ impl WalkBuilder {
             threads: self.threads,
             skip: self.skip.clone(),
             filter: self.filter.clone(),
+            filter_stats: self.filter_stats.clone(),
         }
     }
 
@@ -689,6 +808,17 @@ impl WalkBuilder {
     pub fn max_filesize(&mut self, filesize: Option<u64>) -> &mut WalkBuilder {
         self.max_filesize = filesize;
         self
+    }
+
+    /// Enable collection of filter statistics during the walk.
+    ///
+    /// Returns a shared handle to the statistics that will be populated as
+    /// the walk proceeds. The handle can be read after the walk completes to
+    /// see how many entries were skipped by each filter dimension.
+    pub fn filter_stats(&mut self) -> Arc<WalkFilterStats> {
+        let stats = Arc::new(WalkFilterStats::default());
+        self.filter_stats = Some(stats.clone());
+        stats
     }
 
     /// The number of threads to use for traversal.
@@ -1042,6 +1172,7 @@ pub struct Walk {
     max_filesize: Option<u64>,
     skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
+    filter_stats: Option<Arc<WalkFilterStats>>,
 }
 
 impl Walk {
@@ -1322,6 +1453,7 @@ pub struct WalkParallel {
     threads: usize,
     skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
+    filter_stats: Option<Arc<WalkFilterStats>>,
 }
 
 impl WalkParallel {
@@ -1421,6 +1553,7 @@ impl WalkParallel {
                     follow_links: self.follow_links,
                     skip: self.skip.clone(),
                     filter: self.filter.clone(),
+                    filter_stats: self.filter_stats.clone(),
                 })
                 .map(|worker| s.spawn(|| worker.run()))
                 .collect();
@@ -1620,6 +1753,8 @@ struct Worker<'s> {
     /// A predicate applied to dir entries. If true, the entry and all
     /// children will be skipped.
     filter: Option<Filter>,
+    /// Shared filter statistics counters.
+    filter_stats: Option<Arc<WalkFilterStats>>,
 }
 
 impl<'s> Worker<'s> {
