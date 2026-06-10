@@ -7776,4 +7776,398 @@ mod tests {
             }
         }
     }
+
+    // ---------------------------------------------------------------
+    // Category A: Document generation completeness
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn man_page_contains_all_flags() {
+        let man = crate::flags::doc::man::generate();
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            let roff_name = long.replace("-", r"\-");
+            assert!(
+                man.contains(&roff_name),
+                "man page does not contain flag --{long}",
+            );
+        }
+    }
+
+    #[test]
+    fn help_short_contains_all_flags() {
+        let help = crate::flags::doc::help::generate_short();
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                help.contains(&format!("--{long}")),
+                "short help does not contain flag --{long}",
+            );
+        }
+    }
+
+    #[test]
+    fn help_long_contains_all_flags() {
+        let help = crate::flags::doc::help::generate_long();
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                help.contains(&format!("--{long}")),
+                "long help does not contain flag --{long}",
+            );
+        }
+    }
+
+    #[test]
+    fn help_short_contains_all_short_flags() {
+        let help = crate::flags::doc::help::generate_short();
+        for flag in FLAGS.iter() {
+            let Some(byte) = flag.name_short() else { continue };
+            let short_char = char::from(byte);
+            let long = flag.name_long();
+            assert!(
+                help.contains(&format!("-{short_char}")),
+                "short help does not contain -{short_char} for flag --{long}",
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Category B: Shell completion consistency
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bash_completions_contain_all_flags() {
+        let bash = crate::flags::complete::bash::generate();
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                bash.contains(&format!("--{long}")),
+                "bash completions missing --{long}",
+            );
+            if let Some(byte) = flag.name_short() {
+                let ch = char::from(byte);
+                assert!(
+                    bash.contains(&format!("-{ch}")),
+                    "bash completions missing -{ch} for --{long}",
+                );
+            }
+            if let Some(negated) = flag.name_negated() {
+                assert!(
+                    bash.contains(&format!("--{negated}")),
+                    "bash completions missing --{negated} for --{long}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fish_completions_contain_all_flags() {
+        let fish = crate::flags::complete::fish::generate();
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                fish.contains(&format!("-l {long}")),
+                "fish completions missing -l {long}",
+            );
+            if let Some(byte) = flag.name_short() {
+                let ch = char::from(byte);
+                assert!(
+                    fish.contains(&format!("-s {ch}")),
+                    "fish completions missing -s {ch} for --{long}",
+                );
+            }
+            if let Some(negated) = flag.name_negated() {
+                assert!(
+                    fish.contains(&format!("-l {negated}")),
+                    "fish completions missing -l {negated} for --{long}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn powershell_completions_contain_all_flags() {
+        let ps = crate::flags::complete::powershell::generate();
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                ps.contains(&format!("'--{long}'")),
+                "powershell completions missing '--{long}'",
+            );
+            if let Some(byte) = flag.name_short() {
+                let ch = char::from(byte);
+                assert!(
+                    ps.contains(&format!("'-{ch}'")),
+                    "powershell completions missing '-{ch}' for --{long}",
+                );
+            }
+            if let Some(negated) = flag.name_negated() {
+                assert!(
+                    ps.contains(&format!("'--{negated}'")),
+                    "powershell completions missing '--{negated}' for --{long}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bash_completions_contain_choices() {
+        let bash = crate::flags::complete::bash::generate();
+        for flag in FLAGS.iter() {
+            let choices = flag.doc_choices();
+            if choices.is_empty() {
+                continue;
+            }
+            let long = flag.name_long();
+            for choice in choices {
+                assert!(
+                    bash.contains(choice),
+                    "bash completions missing choice '{choice}' for --{long}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fish_completions_contain_choices() {
+        let fish = crate::flags::complete::fish::generate();
+        for flag in FLAGS.iter() {
+            let choices = flag.doc_choices();
+            if choices.is_empty() {
+                continue;
+            }
+            let long = flag.name_long();
+            for choice in choices {
+                assert!(
+                    fish.contains(choice),
+                    "fish completions missing choice '{choice}' for --{long}",
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Category C: Structural invariants
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn negation_naming_convention() {
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            let Some(negated) = flag.name_negated() else { continue };
+            let valid = if let Some(stripped) = long.strip_prefix("no-") {
+                negated == stripped
+            } else {
+                negated == format!("no-{long}")
+            };
+            assert!(
+                valid,
+                "flag --{long} has negation --{negated} which does not \
+                 follow the --foo/--no-foo convention",
+            );
+        }
+    }
+
+    #[test]
+    fn non_other_completion_type_not_switch() {
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            match flag.completion_type() {
+                CompletionType::Other => continue,
+                _ => {
+                    assert!(
+                        !flag.is_switch(),
+                        "flag --{long} has a non-Other completion_type \
+                         but is a switch",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doc_short_and_doc_long_non_empty() {
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                !flag.doc_short().is_empty(),
+                "flag --{long} has empty doc_short",
+            );
+            assert!(
+                !flag.doc_long().trim().is_empty(),
+                "flag --{long} has empty doc_long",
+            );
+        }
+    }
+
+    #[test]
+    fn flag_cross_references_are_valid() {
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            let doc = flag.doc_long();
+            let mut remaining = doc;
+            while let Some(start) = remaining.find(r"\flag{") {
+                let after = &remaining[start + r"\flag{".len()..];
+                let end = after.find('}').unwrap_or_else(|| {
+                    panic!(
+                        "unclosed \\flag{{ in doc_long for --{long}"
+                    )
+                });
+                let name = &after[..end];
+                assert!(
+                    crate::flags::parse::lookup(name).is_some(),
+                    "flag --{long} doc_long references \\flag{{{name}}} \
+                     but '{name}' is not a known flag",
+                );
+                remaining = &after[end + 1..];
+            }
+        }
+    }
+
+    #[test]
+    fn flag_negate_cross_references_are_valid() {
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            let doc = flag.doc_long();
+            let mut remaining = doc;
+            while let Some(start) = remaining.find(r"\flag-negate{") {
+                let after =
+                    &remaining[start + r"\flag-negate{".len()..];
+                let end = after.find('}').unwrap_or_else(|| {
+                    panic!(
+                        "unclosed \\flag-negate{{ in doc_long for --{long}"
+                    )
+                });
+                let name = &after[..end];
+                let referenced = crate::flags::parse::lookup(name);
+                assert!(
+                    referenced.is_some(),
+                    "flag --{long} doc_long references \
+                     \\flag-negate{{{name}}} but '{name}' is not a known flag",
+                );
+                assert!(
+                    referenced.unwrap().name_negated().is_some(),
+                    "flag --{long} doc_long references \
+                     \\flag-negate{{{name}}} but '{name}' has no negation",
+                );
+                remaining = &after[end + 1..];
+            }
+        }
+    }
+
+    #[test]
+    fn all_flags_resolvable_by_lookup() {
+        for flag in FLAGS.iter() {
+            let long = flag.name_long();
+            assert!(
+                crate::flags::parse::lookup(long).is_some(),
+                "lookup failed for flag --{long}",
+            );
+            for alias in flag.aliases() {
+                assert!(
+                    crate::flags::parse::lookup(alias).is_some(),
+                    "lookup failed for alias --{alias} of flag --{long}",
+                );
+            }
+            if let Some(negated) = flag.name_negated() {
+                assert!(
+                    crate::flags::parse::lookup(negated).is_some(),
+                    "lookup failed for negation --{negated} of flag --{long}",
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Category D: Cross-flag conflict combinations
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn case_sensitivity_three_way() {
+        // -s then -i then -S: smart-case wins
+        let args = parse_low_raw(["-s", "-i", "-S"]).unwrap();
+        assert_eq!(CaseMode::Smart, args.case);
+
+        // -S then -s: case-sensitive wins
+        let args = parse_low_raw(["-S", "-s"]).unwrap();
+        assert_eq!(CaseMode::Sensitive, args.case);
+
+        // -s then -i: ignore-case wins
+        let args = parse_low_raw(["-s", "-i"]).unwrap();
+        assert_eq!(CaseMode::Insensitive, args.case);
+
+        // -i then -S: smart-case wins
+        let args = parse_low_raw(["-i", "-S"]).unwrap();
+        assert_eq!(CaseMode::Smart, args.case);
+
+        // All three with -i last
+        let args = parse_low_raw(["-S", "-s", "-i"]).unwrap();
+        assert_eq!(CaseMode::Insensitive, args.case);
+
+        // Long form interleaving
+        let args =
+            parse_low_raw(["--ignore-case", "--case-sensitive"]).unwrap();
+        assert_eq!(CaseMode::Sensitive, args.case);
+
+        let args =
+            parse_low_raw(["--case-sensitive", "--smart-case"]).unwrap();
+        assert_eq!(CaseMode::Smart, args.case);
+    }
+
+    #[test]
+    fn count_and_count_matches_interaction() {
+        let args = parse_low_raw(["--count", "--count-matches"]).unwrap();
+        assert_eq!(Mode::Search(SearchMode::CountMatches), args.mode);
+
+        let args = parse_low_raw(["--count-matches", "--count"]).unwrap();
+        assert_eq!(Mode::Search(SearchMode::Count), args.mode);
+
+        let args = parse_low_raw(["-c", "--count-matches"]).unwrap();
+        assert_eq!(Mode::Search(SearchMode::CountMatches), args.mode);
+
+        let args = parse_low_raw(["--count-matches", "-c"]).unwrap();
+        assert_eq!(Mode::Search(SearchMode::Count), args.mode);
+    }
+
+    #[test]
+    fn buffer_modes_cross_flag() {
+        let args = parse_low_raw([
+            "--block-buffered",
+            "--line-buffered",
+        ])
+        .unwrap();
+        assert_eq!(BufferMode::Line, args.buffer);
+
+        let args = parse_low_raw([
+            "--line-buffered",
+            "--block-buffered",
+        ])
+        .unwrap();
+        assert_eq!(BufferMode::Block, args.buffer);
+
+        // Negation resets to auto
+        let args = parse_low_raw([
+            "--block-buffered",
+            "--no-block-buffered",
+        ])
+        .unwrap();
+        assert_eq!(BufferMode::Auto, args.buffer);
+
+        let args = parse_low_raw([
+            "--line-buffered",
+            "--no-line-buffered",
+        ])
+        .unwrap();
+        assert_eq!(BufferMode::Auto, args.buffer);
+
+        // Cross-flag with negation interleaved
+        let args = parse_low_raw([
+            "--line-buffered",
+            "--block-buffered",
+            "--no-block-buffered",
+        ])
+        .unwrap();
+        assert_eq!(BufferMode::Auto, args.buffer);
+    }
 }
