@@ -66,6 +66,7 @@ pub(crate) struct LowArgs {
     pub(crate) ignore_file_case_insensitive: bool,
     pub(crate) include_zero: bool,
     pub(crate) invert_match: bool,
+    pub(crate) json_always_begin_end: bool,
     pub(crate) line_number: Option<bool>,
     pub(crate) logging: Option<LoggingMode>,
     pub(crate) max_columns: Option<u64>,

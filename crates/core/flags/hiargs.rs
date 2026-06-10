@@ -62,6 +62,7 @@ pub(crate) struct HiArgs {
     ignore_file: Vec<PathBuf>,
     include_zero: bool,
     invert_match: bool,
+    json_always_begin_end: bool,
     is_terminal_stdout: bool,
     line_number: bool,
     max_columns: Option<u64>,
@@ -279,6 +280,7 @@ impl HiArgs {
             ignore_file_case_insensitive: low.ignore_file_case_insensitive,
             include_zero: low.include_zero,
             invert_match: low.invert_match,
+            json_always_begin_end: low.json_always_begin_end,
             is_terminal_stdout: state.is_terminal_stdout,
             line_number,
             max_columns: low.max_columns,
@@ -598,7 +600,7 @@ impl HiArgs {
     ) -> grep::printer::JSON<W> {
         grep::printer::JSONBuilder::new()
             .pretty(false)
-            .always_begin_end(false)
+            .always_begin_end(self.json_always_begin_end)
             .replacement(self.replace.clone().map(|r| r.into()))
             .build(wtr)
     }
