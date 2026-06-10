@@ -227,9 +227,13 @@ impl DecompressionReaderBuilder {
             return DecompressionReader::new_passthru(path);
         };
         cmd.arg(path);
+        let cmd_desc = format!("{cmd:?}");
 
         match self.command_builder.build(&mut cmd) {
-            Ok(cmd_reader) => Ok(DecompressionReader { rdr: Ok(cmd_reader) }),
+            Ok(cmd_reader) => Ok(DecompressionReader {
+                rdr: Ok(cmd_reader),
+                command: Some(cmd_desc),
+            }),
             Err(err) => {
                 log::debug!(
                     "{}: error spawning command '{:?}': {} \
@@ -331,6 +335,9 @@ impl DecompressionReaderBuilder {
 #[derive(Debug)]
 pub struct DecompressionReader {
     rdr: Result<CommandReader, File>,
+    /// The command used for decompression, if any. This is `None` when the
+    /// reader is a passthru (no decompression command matched).
+    command: Option<String>,
 }
 
 impl DecompressionReader {
@@ -360,7 +367,15 @@ impl DecompressionReader {
     /// executing another process.
     fn new_passthru(path: &Path) -> Result<DecompressionReader, CommandError> {
         let file = File::open(path)?;
-        Ok(DecompressionReader { rdr: Err(file) })
+        Ok(DecompressionReader { rdr: Err(file), command: None })
+    }
+
+    /// Returns the command used for decompression, if one was used.
+    ///
+    /// When the reader is a passthru (i.e., the file didn't match any
+    /// decompression glob), this returns `None`.
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref()
     }
 
     /// Closes this reader, freeing any resources used by its underlying child

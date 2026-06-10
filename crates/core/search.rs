@@ -221,6 +221,24 @@ impl<W: WriteColor> Printer<W> {
     }
 }
 
+/// A trait for readers backed by a child process that must be explicitly
+/// closed to reap the process and check its exit status.
+trait CloseableReader: io::Read {
+    fn close_reader(&mut self) -> io::Result<()>;
+}
+
+impl CloseableReader for grep::cli::CommandReader {
+    fn close_reader(&mut self) -> io::Result<()> {
+        self.close()
+    }
+}
+
+impl CloseableReader for grep::cli::DecompressionReader {
+    fn close_reader(&mut self) -> io::Result<()> {
+        self.close()
+    }
+}
+
 /// A worker for executing searches.
 ///
 /// It is intended for a single worker to execute many searches, and is
@@ -291,6 +309,42 @@ impl<W: WriteColor> SearchWorker<W> {
         !self.config.preprocessor_globs.matched(path, false).is_ignore()
     }
 
+    /// Searches using a child-process-backed reader, then closes the reader
+    /// and checks its exit status. Both search and close errors are annotated
+    /// with `context` so that the originating command and file are identifiable
+    /// in the error message.
+    ///
+    /// When both the search and close fail, the close error (which typically
+    /// carries the child's stderr) is logged as a warning so it is not lost,
+    /// and the search error is returned.
+    fn search_reader_and_close<R: CloseableReader>(
+        &mut self,
+        path: &Path,
+        rdr: &mut R,
+        context: &str,
+    ) -> io::Result<SearchResult> {
+        let result = self.search_reader(path, rdr);
+        let close_result = rdr.close_reader();
+        if result.is_err() {
+            if let Err(ref close_err) = close_result {
+                log::warn!("{context}: {close_err}");
+            }
+        }
+        let search_result = result.map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("{context}: {err}"),
+            )
+        })?;
+        close_result.map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("{context}: {err}"),
+            )
+        })?;
+        Ok(search_result)
+    }
+
     /// Search the given file path by first asking the preprocessor for the
     /// data to search instead of opening the path directly.
     fn search_preprocessor(
@@ -311,16 +365,8 @@ impl<W: WriteColor> SearchWorker<W> {
                 ),
             )
         })?;
-        let result = self.search_reader(path, &mut rdr).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("preprocessor command failed: '{cmd:?}': {err}"),
-            )
-        });
-        let close_result = rdr.close();
-        let search_result = result?;
-        close_result?;
-        Ok(search_result)
+        let context = format!("preprocessor command failed: '{cmd:?}'");
+        self.search_reader_and_close(path, &mut rdr, &context)
     }
 
     /// Attempt to decompress the data at the given file path and search the
@@ -331,11 +377,18 @@ impl<W: WriteColor> SearchWorker<W> {
             return self.search_path(path);
         };
         let mut rdr = decomp_builder.build(path)?;
-        let result = self.search_reader(path, &mut rdr);
-        let close_result = rdr.close();
-        let search_result = result?;
-        close_result?;
-        Ok(search_result)
+        let context = match rdr.command() {
+            Some(cmd) => {
+                format!("decompression command failed: '{cmd}'")
+            }
+            None => {
+                format!(
+                    "decompression failed for '{}'",
+                    path.display(),
+                )
+            }
+        };
+        self.search_reader_and_close(path, &mut rdr, &context)
     }
 
     /// Search the contents of the given file path.
@@ -375,6 +428,43 @@ impl<W: WriteColor> SearchWorker<W> {
     }
 }
 
+/// Dispatches a search across all `Printer` variants, creating a sink from
+/// each printer type and collecting the result. The `$search_expr` is invoked
+/// with `$sink` bound to the printer-specific sink.
+///
+/// The only behavioral difference between variants is how stats are collected:
+/// JSON printers always produce stats, while Standard/Summary may not.
+macro_rules! search_with_sink {
+    ($printer:expr, $matcher:expr, $path:expr, |$sink:ident| $search_expr:expr) => {{
+        match *$printer {
+            Printer::Standard(ref mut p) => {
+                let mut $sink = p.sink_with_path($matcher, $path);
+                $search_expr?;
+                Ok(SearchResult {
+                    has_match: $sink.has_match(),
+                    stats: $sink.stats().map(|s| s.clone()),
+                })
+            }
+            Printer::Summary(ref mut p) => {
+                let mut $sink = p.sink_with_path($matcher, $path);
+                $search_expr?;
+                Ok(SearchResult {
+                    has_match: $sink.has_match(),
+                    stats: $sink.stats().map(|s| s.clone()),
+                })
+            }
+            Printer::JSON(ref mut p) => {
+                let mut $sink = p.sink_with_path($matcher, $path);
+                $search_expr?;
+                Ok(SearchResult {
+                    has_match: $sink.has_match(),
+                    stats: Some($sink.stats().clone()),
+                })
+            }
+        }
+    }};
+}
+
 /// Search the contents of the given file path using the given matcher,
 /// searcher and printer.
 fn search_path<M: Matcher, W: WriteColor>(
@@ -383,32 +473,9 @@ fn search_path<M: Matcher, W: WriteColor>(
     printer: &mut Printer<W>,
     path: &Path,
 ) -> io::Result<SearchResult> {
-    match *printer {
-        Printer::Standard(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_path(&matcher, path, &mut sink)?;
-            Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
-            })
-        }
-        Printer::Summary(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_path(&matcher, path, &mut sink)?;
-            Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
-            })
-        }
-        Printer::JSON(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_path(&matcher, path, &mut sink)?;
-            Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: Some(sink.stats().clone()),
-            })
-        }
-    }
+    search_with_sink!(printer, &matcher, path, |sink| {
+        searcher.search_path(&matcher, path, &mut sink)
+    })
 }
 
 /// Search the contents of the given reader using the given matcher, searcher
@@ -420,30 +487,7 @@ fn search_reader<M: Matcher, R: io::Read, W: WriteColor>(
     path: &Path,
     mut rdr: R,
 ) -> io::Result<SearchResult> {
-    match *printer {
-        Printer::Standard(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
-            Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
-            })
-        }
-        Printer::Summary(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
-            Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: sink.stats().map(|s| s.clone()),
-            })
-        }
-        Printer::JSON(ref mut p) => {
-            let mut sink = p.sink_with_path(&matcher, path);
-            searcher.search_reader(&matcher, &mut rdr, &mut sink)?;
-            Ok(SearchResult {
-                has_match: sink.has_match(),
-                stats: Some(sink.stats().clone()),
-            })
-        }
-    }
+    search_with_sink!(printer, &matcher, path, |sink| {
+        searcher.search_reader(&matcher, &mut rdr, &mut sink)
+    })
 }
