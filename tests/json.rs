@@ -439,3 +439,41 @@ rgtest!(r1412_look_behind_match_missing, |dir: Dir, mut cmd: TestCommand| {
     assert_eq!(m.lines, Data::text("bar\n"));
     assert_eq!(m.submatches.len(), 1);
 });
+
+// Verify that --null-data with anchored patterns produces correct JSON output,
+// consistent with standard output. This is a regression test for a bug where
+// ^/$ anchors were bound to \n instead of NUL in --null-data mode.
+rgtest!(null_data_json_anchors, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "foo\x00bar\x00baz\x00");
+
+    let msgs = json_decode(
+        &cmd.arg("--null-data").arg("--json").arg(r"^bar$").arg("test").stdout(),
+    );
+    // Expect: begin, match, end, summary
+    assert_eq!(msgs.len(), 4);
+
+    let m = msgs[1].unwrap_match();
+    // The lines field includes the NUL terminator.
+    assert_eq!(m.lines, Data::text("bar\x00"));
+    assert_eq!(m.submatches.len(), 1);
+    assert_eq!(m.submatches[0].m, Data::text("bar"));
+    assert_eq!(m.submatches[0].start, 0);
+    assert_eq!(m.submatches[0].end, 3);
+});
+
+// Verify that --null-data + --line-regexp with embedded \n does not produce
+// spurious JSON matches.
+rgtest!(null_data_json_line_regexp_no_false_positive, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "hello\nworld\x00world\x00");
+
+    let msgs = json_decode(
+        &cmd.args(&["--null-data", "--json", "--line-regexp", "world"])
+            .arg("test")
+            .stdout(),
+    );
+    // Expect: begin, match (only the standalone "world" record), end, summary
+    assert_eq!(msgs.len(), 4);
+
+    let m = msgs[1].unwrap_match();
+    assert_eq!(m.lines, Data::text("world\x00"));
+});

@@ -725,9 +725,11 @@ impl<'p, 's, M: Matcher, W: WriteColor> StandardSink<'p, 's, M, W> {
             },
         )?;
         // Don't report empty matches appearing at the end of the bytes.
+        // Match offsets are normalized to be relative to range.start, so we
+        // compare against the length of the matched region.
         if !matches.is_empty()
             && matches.last().unwrap().is_empty()
-            && matches.last().unwrap().start() >= range.end
+            && matches.last().unwrap().start() >= range.end - range.start
         {
             matches.pop().unwrap();
         }

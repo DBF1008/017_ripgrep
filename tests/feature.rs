@@ -1172,3 +1172,59 @@ rgtest!(stop_on_nonmatch, |dir: Dir, mut cmd: TestCommand| {
     cmd.args(&["--stop-on-nonmatch", "[235]"]);
     eqnice!("test:line2\ntest:line3\n", cmd.stdout());
 });
+
+// Tests for --null-data with anchored patterns.
+//
+// When --null-data is used, NUL bytes delimit records. The ^ and $ anchors
+// should match at record boundaries, not at \n positions within a record.
+
+// Basic: ^pattern$ should match a complete NUL-delimited record.
+rgtest!(null_data_anchors_basic, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "foo\x00bar\x00baz\x00");
+    cmd.arg("--null-data").arg(r"^bar$").arg("test");
+    eqnice!("bar\x00", cmd.stdout());
+});
+
+// When records contain \n, ^pattern$ should NOT match a sub-line within a
+// record. The entire record (minus the NUL terminator) is the "line".
+rgtest!(null_data_anchors_embedded_newline, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "hello\nbar\x00bar\x00");
+    cmd.arg("--null-data").arg(r"^bar$").arg("test");
+    // Only the second record "bar" should match. The first record is
+    // "hello\nbar" which is NOT equal to "bar".
+    eqnice!("bar\x00", cmd.stdout());
+});
+
+// --line-regexp with --null-data should match against entire NUL-delimited
+// records, not against \n-delimited sub-lines within a record.
+rgtest!(null_data_line_regexp_embedded_newline, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "hello\nworld\x00world\x00");
+    cmd.args(&["--null-data", "--line-regexp", "world", "test"]);
+    // "hello\nworld" is NOT a whole-line match for "world".
+    // Only the standalone "world" record matches.
+    eqnice!("world\x00", cmd.stdout());
+});
+
+// $ should match at the end of a NUL-delimited record, even when the record
+// contains embedded \n characters.
+rgtest!(null_data_dollar_anchor, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "alpha\nbeta\x00gamma\x00");
+    cmd.arg("--null-data").arg(r"beta$").arg("test");
+    // "beta" is at the end of the first record "alpha\nbeta".
+    eqnice!("alpha\nbeta\x00", cmd.stdout());
+});
+
+// ^ should match at the start of each NUL-delimited record, not at \n within.
+rgtest!(null_data_caret_anchor, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "foo\x00bar\nbaz\x00qux\x00");
+    cmd.arg("--null-data").arg(r"^bar").arg("test");
+    // "bar\nbaz" starts with "bar", so the second record matches.
+    eqnice!("bar\nbaz\x00", cmd.stdout());
+});
+
+// Multiple records matching ^pattern$ with --null-data.
+rgtest!(null_data_anchors_multiple, |dir: Dir, mut cmd: TestCommand| {
+    dir.create("test", "foo\x00bar\x00foo\x00baz\x00foo\x00");
+    cmd.arg("--null-data").arg(r"^foo$").arg("test");
+    eqnice!("foo\x00foo\x00foo\x00", cmd.stdout());
+});

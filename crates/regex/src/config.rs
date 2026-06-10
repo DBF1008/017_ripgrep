@@ -196,10 +196,26 @@ impl ConfiguredHIR {
                 .parse(&pattern)
                 .map_err(Error::generic)?;
             let analysis = AstAnalysis::from_ast(&ast);
+            // When the line terminator is not \n or CRLF (e.g., NUL for
+            // --null-data), we disable multi-line mode so that ^ and $ become
+            // haystack anchors (Start/End, i.e. \A/\z) instead of line
+            // anchors (StartLF/EndLF). The regex engine's StartLF/EndLF are
+            // hardcoded to \n, so they would incorrectly match at \n positions
+            // within a NUL-delimited record. The searcher's slow line-by-line
+            // path feeds one record at a time to the matcher (with the NUL
+            // stripped), so Start/End naturally match at record boundaries.
+            //
+            // Note: if the user explicitly writes (?m) in their pattern, the
+            // inline flag overrides this setting and ^ and $ will still anchor
+            // to \n. This is expected since it's an explicit user choice.
+            let effective_multi_line = config.multi_line
+                && !config.line_terminator.map_or(false, |lt| {
+                    lt.as_byte() != b'\n' && !lt.is_crlf()
+                });
             let mut hir = hir::translate::TranslatorBuilder::new()
                 .utf8(false)
                 .case_insensitive(config.is_case_insensitive(&analysis))
-                .multi_line(config.multi_line)
+                .multi_line(effective_multi_line)
                 .dot_matches_new_line(config.dot_matches_new_line)
                 .crlf(config.crlf)
                 .swap_greed(config.swap_greed)
@@ -295,7 +311,16 @@ impl ConfiguredHIR {
     /// See: <https://github.com/BurntSushi/ripgrep/issues/2260>
     pub(crate) fn line_terminator(&self) -> Option<LineTerminator> {
         if self.hir.properties().look_set().contains_anchor_haystack() {
-            None
+            // When using a non-standard line terminator (e.g., NUL for
+            // --null-data), we still need to report it even when haystack
+            // anchors are present. The regex cannot match the line terminator
+            // byte (it was stripped by strip_from_match), so this is safe.
+            // Returning the line terminator here ensures the searcher's
+            // NUL slow-path workaround in is_line_by_line_fast() is triggered,
+            // which is required for correct record-by-record matching.
+            self.config.line_terminator.filter(|lt| {
+                lt.as_byte() != b'\n' && !lt.is_crlf()
+            })
         } else {
             self.config.line_terminator
         }
@@ -331,17 +356,39 @@ impl ConfiguredHIR {
     }
 
     /// Returns the "start line" anchor for this configuration.
+    ///
+    /// When the line terminator is not `\n` or CRLF (e.g., NUL for
+    /// `--null-data`), we use `Start` (haystack anchor) instead of `StartLF`.
+    /// The regex engine's `StartLF` is hardcoded to `\n`, which would
+    /// incorrectly match at `\n` positions within a NUL-delimited record.
+    /// Using `Start` ensures the anchor matches only at the beginning of each
+    /// record as fed to the matcher by the searcher's slow line-by-line path.
     fn line_anchor_start(&self) -> hir::Look {
         if self.config.crlf {
             hir::Look::StartCRLF
+        } else if self.config.line_terminator.map_or(false, |lt| {
+            lt.as_byte() != b'\n'
+        }) {
+            hir::Look::Start
         } else {
             hir::Look::StartLF
         }
     }
 
     /// Returns the "end line" anchor for this configuration.
+    ///
+    /// See `line_anchor_start` for why we use `End` instead of `EndLF` for
+    /// non-standard line terminators.
     fn line_anchor_end(&self) -> hir::Look {
-        if self.config.crlf { hir::Look::EndCRLF } else { hir::Look::EndLF }
+        if self.config.crlf {
+            hir::Look::EndCRLF
+        } else if self.config.line_terminator.map_or(false, |lt| {
+            lt.as_byte() != b'\n'
+        }) {
+            hir::Look::End
+        } else {
+            hir::Look::EndLF
+        }
     }
 }
 

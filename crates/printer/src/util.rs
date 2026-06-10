@@ -517,16 +517,38 @@ where
         // No need to rember the line terminator as we aren't doing a replace
         // here.
         trim_line_terminator(searcher, bytes, &mut m);
-        bytes = &bytes[..m.end()];
+        // Slice to just the matched line content so that haystack anchors
+        // (\A and \z) correctly match at the boundaries of the individual
+        // record rather than the whole buffer. This is needed when the line
+        // terminator is not \n (e.g., NUL for --null-data), because ^ and $
+        // are translated to \A/\z in that case.
+        bytes = &bytes[range.start..m.end()];
     }
-    matcher
-        .find_iter_at(bytes, range.start, |m| {
-            if m.start() >= range.end {
-                return false;
-            }
-            matched(m)
-        })
-        .map_err(io::Error::error_message)
+    if is_multi_line {
+        matcher
+            .find_iter_at(bytes, range.start, |m| {
+                if m.start() >= range.end {
+                    return false;
+                }
+                matched(m)
+            })
+            .map_err(io::Error::error_message)
+    } else {
+        matcher
+            .find_iter_at(bytes, 0, |m| {
+                // Adjust offsets back to buffer-level so callers see the
+                // same coordinate space regardless of slicing.
+                let m = Match::new(
+                    m.start() + range.start,
+                    m.end() + range.start,
+                );
+                if m.start() >= range.end {
+                    return false;
+                }
+                matched(m)
+            })
+            .map_err(io::Error::error_message)
+    }
 }
 
 /// Given a buf and some bounds, if there is a line terminator at the end of
